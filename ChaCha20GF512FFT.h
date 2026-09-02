@@ -220,6 +220,14 @@ private:
 // Total: 2394 / 512 ~= 4.68 GF multiplications per output word, versus 511
 // with direct Horner evaluation.  The monomial->novel conversion is paid once
 // during initialization and does not affect steady-state throughput.
+// NOTE:
+// The debug/reference API and its 4096-byte monomial coefficient copy are
+// intentionally always present.  Earlier versions made them conditional on
+// CHACHA20GF512_ENABLE_TEST_API, which changed sizeof(ChaCha20GF512FFT) across
+// translation units / precompiled headers and could cause an ODR/layout
+// mismatch in MSVC Release builds.  A header-only class must have one identical
+// definition everywhere.
+//
 class ChaCha20GF512FFT
 {
 public:
@@ -300,7 +308,6 @@ public:
     static constexpr std::size_t gf_seed_state_bytes() { return GF_SEED_BYTES; }
     static constexpr std::size_t gf_cached_block_bytes() { return FFT_SIZE * sizeof(uint64_t); }
 
-#ifdef CHACHA20GF512_ENABLE_TEST_API
     // Slow direct reference evaluation of P(position).  Test use only.
     uint64_t debug_gf_horner(uint64_t position) const
     {
@@ -332,7 +339,6 @@ public:
     {
         return cpu_has_pclmul();
     }
-#endif
 
 private:
     static constexpr uint64_t GF_REDUCTION = 0x1BULL;
@@ -345,18 +351,17 @@ private:
 
     ChaCha20Counter64 chacha_;
 
-#ifdef CHACHA20GF512_ENABLE_TEST_API
-    // Retained only in test builds so direct Horner evaluation can verify the
-    // FFT bit-for-bit.  Production builds do not pay these extra 4096 bytes.
-    alignas(64) uint64_t gf_monomial_[GF_COEFFICIENTS]{};
-#endif
+    // Retained unconditionally so ChaCha20GF512FFT has one stable class layout
+    // in every translation unit and precompiled header.  This avoids ODR/layout
+    // mismatches when test and production code are compiled with different macros.
+    uint64_t gf_monomial_[GF_COEFFICIENTS]{};
 
     // The 4096-byte GF coefficient state, represented in the normalized
     // subspace/novel basis after a one-time invertible initialization transform.
-    alignas(64) uint64_t gf_novel_[GF_COEFFICIENTS]{};
+    uint64_t gf_novel_[GF_COEFFICIENTS]{};
 
     // Cached evaluations of one aligned affine subspace (512 output words).
-    alignas(64) uint64_t gf_block_[FFT_SIZE]{};
+    uint64_t gf_block_[FFT_SIZE]{};
     uint64_t gf_block_base_ = INVALID_BLOCK_BASE;
     bool gf_block_valid_ = false;
 
@@ -424,9 +429,7 @@ private:
         for (std::size_t i = 0; i < GF_COEFFICIENTS; ++i) {
             const uint64_t v = load64_le(seed4096 + 8 * i);
             gf_novel_[i] = v;
-#ifdef CHACHA20GF512_ENABLE_TEST_API
             gf_monomial_[i] = v;
-#endif
         }
     }
 
@@ -619,7 +622,6 @@ private:
         bit_index_ = 64;
     }
 
-#ifdef CHACHA20GF512_ENABLE_TEST_API
     uint64_t horner_reference(uint64_t x) const
     {
         uint64_t y = gf_monomial_[GF_COEFFICIENTS - 1];
@@ -627,7 +629,6 @@ private:
             y = gf_mul_portable(y, x) ^ gf_monomial_[i];
         return y;
     }
-#endif
 
     void ensure_gf_block(uint64_t position)
     {

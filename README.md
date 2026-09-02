@@ -558,7 +558,7 @@ be read as measurements of these particular builds, not as universal ratios.
 
 ```text
 PCLMUL runtime support:    yes
-sizeof(ChaCha20GF512FFT):    14016 bytes (test build)
+sizeof(ChaCha20GF512FFT):    13920 bytes
 ChaCha 64/64 test vector:  OK
 GF arithmetic fast/ref:    OK
 FFT vs Horner:             OK
@@ -592,7 +592,7 @@ Measured result:
 
 ```text
 PCLMUL runtime support:    yes
-sizeof(ChaCha20GF512FFT):    14016 bytes (test build)
+sizeof(ChaCha20GF512FFT):    13920 bytes
 ChaCha 64/64 test vector:  OK
 GF arithmetic fast/ref:    OK
 FFT vs Horner:             OK
@@ -620,7 +620,7 @@ faster than the measured MSVC build on the same physical processor.
 
 ```text
 PCLMUL runtime support:    yes
-sizeof(ChaCha20GF512FFT):    14016 bytes (test build)
+sizeof(ChaCha20GF512FFT):    13920 bytes
 ChaCha 64/64 test vector:  OK
 GF arithmetic fast/ref:    OK
 FFT vs Horner:             OK
@@ -648,7 +648,7 @@ Built with the same GCC command shown above.
 
 ```text
 PCLMUL runtime support:    yes
-sizeof(ChaCha20GF512FFT):    14016 bytes (test build)
+sizeof(ChaCha20GF512FFT):    13920 bytes
 ChaCha 64/64 test vector:  OK
 GF arithmetic fast/ref:    OK
 FFT vs Horner:             OK
@@ -732,15 +732,28 @@ The FFT implementation additionally caches one 512-word evaluated block:
 4096 bytes.
 ```
 
-Together with the transformed coefficients, ChaCha state, FFT plan data, and bookkeeping, the current 64-bit production object occupies approximately
+The implementation also retains the original 4096-byte monomial coefficient
+vector used by the reference Horner evaluator. This copy is intentionally kept
+in the class unconditionally so that the header-only `ChaCha20GF512FFT` type
+has exactly the same definition and object layout in every translation unit
+and precompiled header.
+
+The current GCC x86-64 build therefore reports
 
 ```text
-9920 bytes
+13920 bytes
 ```
 
-in the tested GCC build.
+for `sizeof(ChaCha20GF512FFT)`.
 
-The supplied test build defines `CHACHA20GF512_ENABLE_TEST_API` and intentionally retains an additional 4096-byte copy of the original monomial coefficients so the FFT can be compared against direct Horner evaluation; that test object occupies 14016 bytes in the current build.
+Earlier development versions conditionally removed the 4096-byte Horner copy
+with a preprocessor macro. That made the class layout depend on compilation
+settings and could create an ODR/layout mismatch if different translation
+units or precompiled headers saw different macro states. The current version
+uses one stable layout everywhere.
+
+A future cleanup could move the reference Horner state into a separate
+test-only type without changing the production class definition.
 
 These sizes are implementation details, not part of the mathematical construction.
 

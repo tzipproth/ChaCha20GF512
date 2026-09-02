@@ -1,4 +1,3 @@
-#define CHACHA20GF512_ENABLE_TEST_API 1
 #include "ChaCha20GF512FFT.h"
 #include "ChaCha20GF512Parallel.h"
 #include "ChaCha20GF512Seed.h"
@@ -285,7 +284,7 @@ int main(int argc, char** argv)
 
     std::printf("PCLMUL runtime support:    %s\n",
                 ChaCha20GF512FFT::debug_cpu_has_pclmul() ? "yes" : "no");
-    std::printf("sizeof(ChaCha20GF512FFT):    %zu bytes (test build)\n",
+    std::printf("sizeof(ChaCha20GF512FFT):    %zu bytes\n",
                 sizeof(ChaCha20GF512FFT));
     std::printf("ChaCha 64/64 test vector:  %s\n",
                 test_chacha_zero_vector() ? "OK" : "FAILED");
