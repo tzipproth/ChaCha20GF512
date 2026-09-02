@@ -10,7 +10,9 @@ The goal is **not** to claim that its output is empirically “more random than 
 The construction combines:
 
 1. **ChaCha20**, used in its original 256-bit-key / 64-bit-counter / 64-bit-stream-ID layout, as the computational pseudorandom component.
-2. A random degree-511 polynomial over **GF(2^64)**, supplying exact **512-wise independence** for 64-bit output words.
+2. A random degree-511 polynomial over the **Galois field GF(2^64)**, supplying exact **512-wise independence** for 64-bit output words.
+
+**GF** stands for **Galois field**, another name for a finite field. `GF(2^64)` contains exactly `2^64` elements, and in this implementation each field element is represented by one 64-bit word. Field addition is bitwise XOR; multiplication is carry-less polynomial multiplication followed by reduction modulo a fixed irreducible degree-64 polynomial. This field structure is what makes polynomial interpolation work and, in turn, gives the exact 512-wise independence result used by ChaCha20GF512.
 
 The final output is simply
 
@@ -85,7 +87,7 @@ ChaCha20GF512 uses ChaCha20 as a counter-indexed stream primitive, not as a stat
 
 For a fixed key and stream ID, each ChaCha block can be addressed directly by its counter.
 
-## 1.2 GF(2^64) component
+## 1.2 Galois field GF(2^64) component
 
 The second component is a degree-at-most-511 polynomial
 
