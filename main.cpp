@@ -1,6 +1,7 @@
 #include "ChaCha20GF512FFT.h"
 #include "ChaCha20GF512Parallel.h"
 #include "ChaCha20GF512Seed.h"
+#include "toy_kwise_test.h"
 
 #include <algorithm>
 #include <chrono>
@@ -283,19 +284,19 @@ int main(int argc, char** argv)
     if (argc > 2) threads = static_cast<unsigned>(std::strtoul(argv[2], nullptr, 10));
 
     std::printf("PCLMUL runtime support:    %s\n",
-                ChaCha20GF512FFT::debug_cpu_has_pclmul() ? "yes" : "no");
-    std::printf("sizeof(ChaCha20GF512FFT):    %zu bytes\n",
-                sizeof(ChaCha20GF512FFT));
+        ChaCha20GF512FFT::debug_cpu_has_pclmul() ? "yes" : "no");
+    std::printf("sizeof(ChaCha20GF512FFT):    %zu bytes (test build)\n",
+        sizeof(ChaCha20GF512FFT));
     std::printf("ChaCha 64/64 test vector:  %s\n",
-                test_chacha_zero_vector() ? "OK" : "FAILED");
+        test_chacha_zero_vector() ? "OK" : "FAILED");
     std::printf("GF arithmetic fast/ref:    %s\n",
-                test_gf_arithmetic() ? "OK" : "FAILED");
+        test_gf_arithmetic() ? "OK" : "FAILED");
     std::printf("FFT vs Horner:             %s\n",
-                test_fft_vs_horner() ? "OK" : "FAILED");
+        test_fft_vs_horner() ? "OK" : "FAILED");
     std::printf("Hybrid seek test:          %s\n",
-                test_seek() ? "OK" : "FAILED");
+        test_seek() ? "OK" : "FAILED");
     std::printf("Parallel identity x%u:      %s\n", threads,
-                test_parallel_identity(threads) ? "OK" : "FAILED");
+        test_parallel_identity(threads) ? "OK" : "FAILED");
 
     demo_seeding();
 
@@ -303,5 +304,21 @@ int main(int argc, char** argv)
     bench_chacha(count);
     bench_single(count);
     bench_parallel(count, threads);
-    return 0;
+
+    // ------------------------------------------------------------------
+    // Exhaustive toy-model verification of the exact k-wise claim.
+    // The construction is identical to the production generator but scaled
+    // to GF(2^4) (k = 4) and GF(2^8) (k = 3), so the COMPLETE seed space can
+    // be enumerated.  Checks: every k-tuple occurs exactly once for all
+    // position sets (A), the property is sharp at k+1 (B), XOR with a fixed
+    // mask preserves it (C), and a reducible field polynomial is detected (D).
+    // This verifies the theorem and the construction, not the 64-bit stream.
+    // ------------------------------------------------------------------
+    std::printf("\nToy-model k-wise verification (exhaustive seed-space enumeration,\n"
+        "GF(2^4) k=4 and GF(2^8) k=3; runtime about 16 seconds):\n");
+    std::fflush(stdout);
+    const bool toy_ok = run_toy_kwise_test(/*full=*/true, /*gf8_sets=*/4, stdout);
+    std::printf("Toy-model k-wise check:    %s\n", toy_ok ? "OK" : "FAILED");
+
+    return toy_ok ? 0 : 1;
 }
