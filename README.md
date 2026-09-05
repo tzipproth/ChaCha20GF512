@@ -1,93 +1,177 @@
 # ChaCha20GF512
 ## Maximizing What Can Be Proven About a PRNG
 
-> **Once a generator already passes every practical statistical test, what theoretical properties can still be improved?**
+> **ChaCha20 is already an excellent computational PRNG. What exact mathematical properties can be added on top of it?**
 
-ChaCha20GF512 is an experimental pseudorandom number generator built around that question.
+ChaCha20GF512 starts with ChaCha20 and adds a second, independent notion of randomness: **exact 512-wise independence of 64-bit output words**.
 
-The goal is **not** to claim that its output is empirically “more random than ChaCha20.” Modern high-quality generators can reach a point where practical statistical test suites no longer provide a useful ranking of their randomness. ChaCha20GF512 therefore takes a different approach: it combines two complementary notions of pseudorandomness and asks how much can be said about the result **exactly**, rather than only empirically.
+The goal is not to fix a statistical weakness in ChaCha20. No such weakness is assumed. The point is that computational pseudorandomness and exact finite-order independence are different properties, and they can coexist in one generator.
 
-The construction combines:
+For a fixed public stream identifier, ordinary 256-bit-key ChaCha20 has at most `2^256` keyed streams. That is already enough for cryptographic pseudorandomness, but it is too small a family to make even five selected 64-bit outputs *exactly* jointly uniform over all `2^320` possible 5-tuples.
 
-1. **ChaCha20**, used in its original 256-bit-key / 64-bit-counter / 64-bit-stream-ID layout, as the computational pseudorandom component.
-2. A random degree-511 polynomial over the **Galois field GF(2^64)**, supplying exact **512-wise independence** for 64-bit output words.
+ChaCha20GF512 adds an independently seeded degree-511 polynomial over `GF(2^128)`. Each 128-bit field evaluation supplies two adjacent 64-bit GF words (low half, then high half), which are XORed with the corresponding ChaCha20 words. The resulting family has the exact guarantee:
 
-**GF** stands for **Galois field**, another name for a finite field. `GF(2^64)` contains exactly `2^64` elements, and in this implementation each field element is represented by one 64-bit word. Field addition is bitwise XOR; multiplication is carry-less polynomial multiplication followed by reduction modulo a fixed irreducible degree-64 polynomial. This field structure is what makes polynomial interpolation work and, in turn, gives the exact 512-wise independence result used by ChaCha20GF512.
+> **For any 512 distinct `uint64_t` output positions, the 512 words are jointly uniform when the GF coefficients are sampled uniformly and independently.**
 
-The final output is simply
+This is not a statistical-test statement. It follows from finite-field interpolation.
+
+### What ChaCha20GF512 adds to ChaCha20
+
+| Property | ChaCha20 | ChaCha20GF512 |
+|---|---|---|
+| Computational pseudorandomness | Yes, this is ChaCha20's main role | Retained as the cryptographic component |
+| Exact 512-wise independence of 64-bit words | No such exact guarantee follows from the 256-bit keyed family | **Yes** |
+| Exact theorem valid at arbitrary selected positions | Not an information-theoretic claim of ChaCha20 | **Yes, for any <= 512 distinct positions** |
+| Addressable words in one logical stream | Original ChaCha: `2^64` blocks = `2^67` `uint64_t` words per fixed nonce | **`2^128` `uint64_t` words** |
+| Random access | Yes, counter based | Yes |
+| Parallel evaluation of one logical stream | Yes in principle | Yes, implemented on 1024-output-word / 512-evaluation FFT boundaries |
+
+RFC 8439 notes that the original ChaCha design used a 64-bit nonce and a 64-bit block counter. With eight 64-bit words per ChaCha block, that gives `2^67` 64-bit words per fixed nonce. ChaCha20GF512 instead uses HChaCha20 for stream separation and exposes a 128-bit **word-position** space, supporting exactly `2^128` 64-bit word positions in one logical stream. The ChaCha block index is the word position divided by eight and is stored in state words 12..15.
+
+The supported stream is therefore longer by a factor of
 
 ```text
-R(i) = ChaCha20(K, stream_id, i) XOR P(i)
+2^128 / 2^67 = 2^61
+```
+
+than the original 64-bit-counter ChaCha layout for one fixed nonce.
+
+The implementation does not silently wrap at the end of that position space.
+
+---
+
+## Is this “more random” than ChaCha20?
+
+There is no single scalar definition that totally orders good PRNGs as “more random” or “less random.”
+
+Different notions measure different things:
+
+- **computational pseudorandomness:** can an efficient algorithm distinguish the stream from random?
+- **entropy / seed-space size:** how many initialized streams are possible?
+- **exact k-wise independence:** are arbitrary sets of up to `k` outputs *exactly* jointly uniform over the initialization family?
+- **period / addressable stream length:** how long can the generator run before its position space is exhausted?
+- **statistical-test behavior:** does a finite sample trigger a particular empirical test?
+
+ChaCha20GF512 does **not** claim a known improvement over ChaCha20 in computational pseudorandomness. ChaCha20 is already used precisely because its output is computationally pseudorandom.
+
+But in exact finite-order independence the hybrid is genuinely stronger:
+
+> **ChaCha20GF512 adds an exact information-theoretic distribution property that a 256-bit-key ChaCha20 family with fixed/public stream ID cannot possess.**
+
+So “more random” is too vague, but **“strictly stronger in this exact mathematical sense”** is accurate.
+
+The construction is
+
+```text
+j = floor(i / 2)
+G(2j)   = low64(P(j))
+G(2j+1) = high64(P(j))
+R(i)    = ChaCha20(K, stream_id, i) XOR G(i)
 ```
 
 where
 
 ```text
-P(x) = a0 + a1*x + ... + a511*x^511    over GF(2^64).
+P(x) = a0 + a1*x + ... + a511*x^511
 ```
 
-The central claim is therefore not
+is a random polynomial over `GF(2^128)`.
 
-> “ChaCha20GF512 is more random than ChaCha20.”
-
-but rather
-
-> **ChaCha20GF512 makes strictly stronger information-theoretic statements about its output family while retaining the ordinary computational pseudorandomness argument of ChaCha20.**
-
-This is a research/experimental PRNG, not a cryptographic standard and not a claim of a universally “optimal” RNG.
+The 512 GF coefficients occupy 8192 bytes. Together with the 32-byte ChaCha key, the full explicit seed is 8224 bytes.
 
 ---
 
-## Why this is a genuine theoretical addition
+## Stream length / period
 
-With a fixed/public `stream_id`, ordinary ChaCha20 is indexed by a 256-bit key. Therefore there are at most
+ChaCha20GF512 is best viewed as a finite, position-indexed stream rather than as a small-state recurrence with a conventional proven minimal period.
 
-```text
-2^256
-```
-
-distinct keyed streams.
-
-Exact 5-wise independence for 64-bit output words would require five selected outputs to cover all
+Valid word positions are
 
 ```text
-2^(5*64) = 2^320
+0 <= i < 2^128.
 ```
 
-joint values with equal probability.
-
-A family containing only `2^256` streams cannot do that. So, under this model, **ChaCha20 alone cannot even be exactly 5-wise independent for 64-bit words**. This is an information-theoretic counting argument; it says nothing negative about ChaCha20's cryptographic strength.
-
-ChaCha20GF512 adds a separate 32768-bit GF seed space and reaches exact 512-wise independence:
+That is
 
 ```text
-512 * 64 = 32768 bits.
+2^128 uint64_t words
+= 2^131 bytes
+~= 2.72e39 bytes.
 ```
 
-Thus the hybrid possesses an exact distribution property that a 256-bit-key ChaCha20 family **provably cannot possess**, while the XOR construction does not sacrifice ChaCha20's computational pseudorandomness under the assumptions stated below.
+Even at an intentionally absurd sustained output rate of **1 exabyte per second**, exhausting the position space would take about
 
-This is the main motivation for the project.
+```text
+8.6e13 years.
+```
+
+The implementation treats the end of this space as exhaustion:
+
+- `next_int()` does not silently wrap to position zero;
+- random access uses a 128-bit position;
+- parallel bulk generation validates and splits ranges within the same 128-bit domain.
+
+This should not be confused with a theorem that the **minimal period of the 64-bit output values** is exactly `2^128`. No such claim is needed. Equal 64-bit output values may occur at different positions, just as they do in genuine random data.
+
+The useful guarantee is simpler:
+
+> **There are `2^128` distinct supported positions, no position is reused, and the exact 512-wise theorem applies over that entire domain.**
 
 ---
 
 # 1. Construction
 
-## 1.1 ChaCha20 component
+## 1.1 128-bit position
 
-The implementation uses the original ChaCha layout:
+The implementation uses the small POD type
 
-- 256-bit key;
-- 64-bit block counter;
-- 64-bit stream ID / nonce field;
-- 20 rounds.
+```cpp
+ChaCha20GF512Position128
+```
 
-RFC 8439 standardizes the later IETF 32-bit-counter / 96-bit-nonce layout, but explicitly notes that the original ChaCha construction used a **64-bit nonce and 64-bit block counter**.
+with two 64-bit limbs:
 
-ChaCha20GF512 uses ChaCha20 as a counter-indexed stream primitive, not as a state-updating DRBG. There is no periodic rekeying. That is intentional: backtracking resistance after internal-state compromise is a separate DRBG property, whereas this project is concerned with pseudorandomness, exact distribution guarantees, random access, and parallel evaluation.
+```text
+Position = hi * 2^64 + lo.
+```
 
-For a fixed key and stream ID, each ChaCha block can be addressed directly by its counter.
+The old 64-bit APIs remain available as convenience overloads, so existing code using positions below `2^64` does not need to change.
 
-## 1.2 Galois field GF(2^64) component
+The 128-bit output-word position serves three roles:
+
+1. divided by two, it selects the `GF(2^128)` polynomial evaluation point;
+2. its low bit selects the low or high 64-bit half of that field value;
+3. divided by eight, it gives the ChaCha block index because each ChaCha block contains eight `uint64_t` words.
+
+---
+
+## 1.2 ChaCha20 component
+
+The implementation uses the 20-round ChaCha core with a 256-bit key.
+
+RFC 8439 standardizes the later IETF layout with a 32-bit block counter and 96-bit nonce, while explicitly noting that the original ChaCha design used a **64-bit nonce and 64-bit block counter**.
+
+The current ChaCha20GF512 revision goes one step further for its position-indexed use case:
+
+1. the public 64-bit `stream_id` is placed in a 128-bit HChaCha20 input (`stream_id || 0`);
+2. HChaCha20 derives a 256-bit subkey;
+3. all four ChaCha state words 12..15 are then used as one 128-bit block index.
+
+HChaCha20 uses the standard 20 ChaCha rounds without feed-forward and extracts words
+
+```text
+0, 1, 2, 3, 12, 13, 14, 15.
+```
+
+This keeps independent logical streams through subkey derivation while leaving all four counter words available. The current `2^128`-word output domain uses `2^125` ChaCha blocks, so it remains well inside that counter capacity.
+
+This is a **project-specific position-indexed construction**, not the RFC 8439 IETF layout and not a claim that the whole generator is a standardized XChaCha mode. HChaCha20 itself is the established subkey primitive used by XChaCha constructions.
+
+ChaCha20GF512 uses ChaCha as a counter-indexed pseudorandom component, not as a state-updating DRBG. There is no periodic rekeying. Random access and deterministic parallel evaluation are deliberate design goals.
+
+---
+
+## 1.3 Galois field GF(2^128) component
 
 The second component is a degree-at-most-511 polynomial
 
@@ -95,47 +179,97 @@ The second component is a degree-at-most-511 polynomial
 P(x) = a0 + a1*x + ... + a511*x^511
 ```
 
-over the field `GF(2^64)`.
+over `GF(2^128)`.
 
-There are 512 coefficients, each one 64-bit field element:
-
-```text
-512 * 64 bits = 32768 bits = 4096 bytes.
-```
-
-The implementation represents `GF(2^64)` modulo the primitive polynomial
+There are 512 independent coefficients:
 
 ```text
-x^64 + x^4 + x^3 + x + 1
+512 * 128 bits = 65536 bits = 8192 bytes.
 ```
 
-with reduction constant `0x1B`.
-
-The mathematical GF output at word position `i` is
+The implementation uses the binary field defined by
 
 ```text
-G(i) = P(i),
+x^128 + x^7 + x^2 + x + 1,
 ```
 
-where the 64-bit integer `i` is interpreted bijectively as a field element.
+the polynomial used for the `GF(2^128)` multiplication in GHASH/GCM.
 
-## 1.3 Combination
+With the implementation's low-bit polynomial representation, reduction of an overflowed `x^128` term uses the constant
 
-The final output word is
+```text
+0x87
+```
+
+because
+
+```text
+x^128 = x^7 + x^2 + x + 1.
+```
+
+Field addition is bitwise XOR. Field multiplication is carry-less polynomial multiplication followed by reduction modulo the degree-128 polynomial.
+
+On x86/x86-64 the implementation uses `PCLMULQDQ` when available; otherwise it uses a portable shift/XOR implementation.
+
+---
+
+## 1.4 Two 64-bit output words per GF evaluation
+
+For output-word position `i`, define
+
+```text
+j = floor(i / 2).
+```
+
+The mathematical field value is
+
+```text
+P(j) in GF(2^128).
+```
+
+Both halves are used:
+
+```text
+G(2j)   = low64(P(j))
+G(2j+1) = high64(P(j)).
+```
+
+So no half of a field evaluation is discarded. A uniform `GF(2^128)` value is exactly a uniform 128-bit vector, and its low and high halves are jointly uniform 64-bit words. Selecting only one half is a surjective linear projection; selecting both halves is the identity on the 128 output bits.
+
+This mapping is also the main performance improvement over the previous revision: one 512-point additive FFT now supplies 1024 `uint64_t` GF words.
+
+---
+
+## 1.5 Combination
+
+The final output is
 
 ```text
 R(i) = C(i) XOR G(i),
 ```
 
-where `C(i)` is the corresponding 64-bit ChaCha20 output.
+where
 
-XOR is useful here because XOR with a fixed vector is a bijection. It therefore preserves exact uniformity of the GF component, and it also gives a simple reduction argument for preservation of ChaCha20's computational pseudorandomness when the two seed components are independent.
+- `C(i)` is the 64-bit ChaCha word at output position `i`;
+- `G(2j) = low64(P(j))`;
+- `G(2j+1) = high64(P(j))`.
+
+For any fixed ChaCha stream, XOR is simply a position-dependent translation of the GF-derived words. A translation is a bijection, so it cannot destroy the exact finite-order uniformity supplied by the GF component.
+
+The intended division of labor is:
+
+| Component | Role |
+|---|---|
+| ChaCha20/HChaCha20 | computational pseudorandomness |
+| degree-511 GF polynomial | exact finite-order distribution theorem |
+| low/high half mapping | turns each uniform 128-bit evaluation into two adjacent 64-bit words without discarding either half |
+| XOR | lets both properties coexist in one output stream |
 
 ---
 
 # 2. What is proven exactly
 
-## 2.1 Exact 512-wise independence
+## 2.1 Full GF evaluations are exactly 512-wise independent
 
 Let
 
@@ -143,7 +277,7 @@ Let
 P(x) = a0 + a1*x + ... + a511*x^511
 ```
 
-where all 512 coefficients are independent and uniformly distributed in `GF(2^64)`.
+where all 512 coefficients are independent and uniformly distributed in `GF(2^128)`.
 
 For any `t <= 512` distinct field points
 
@@ -160,197 +294,215 @@ the vector
 is exactly uniform over
 
 ```text
-GF(2^64)^t.
+GF(2^128)^t.
 ```
 
-The reason is the Vandermonde/interpolation argument: prescribing values at `t` distinct points imposes `t` independent linear constraints on the 512 coefficients. For `t = 512`, there is exactly one degree-at-most-511 polynomial producing any chosen 512-tuple.
+This is the standard random-polynomial construction of `k`-wise independent variables.
 
-Therefore, for **any 512 distinct output-word positions**, all
+For `t = 512`, prescribing arbitrary field values at 512 distinct points determines exactly one degree-at-most-511 polynomial by interpolation.
+
+For smaller `t`, the remaining coefficient freedom gives the same uniform result.
+
+This is an exact algebraic statement, not a statistical-test result.
+
+---
+
+## 2.2 The 64-bit output words inherit exact 512-wise independence
+
+Take any `t <= 512` distinct output-word positions
 
 ```text
-2^(512*64) = 2^32768
+i1, i2, ..., it.
 ```
 
-possible 512-tuples occur exactly once over the complete 4096-byte GF seed space.
-
-For `t < 512`, every possible `t`-tuple occurs exactly
+Map them to GF evaluation points
 
 ```text
-2^(32768 - 64*t)
+jr = floor(ir / 2).
 ```
 
-times over that seed space.
+Several selected words may refer to the same GF point, but at most two can do so: one asks for the low half and one for the high half. Let there be `r <= t <= 512` distinct GF points among the selected positions.
 
-This is an exact combinatorial statement, not a statistical-test result.
+By Section 2.1, the `r` full values
 
-## 2.2 Arbitrary positions, not only consecutive outputs
+```text
+(P(j1), ..., P(jr))
+```
 
-The selected positions need not be adjacent. For example:
+are independent and uniform 128-bit field elements. For each such value, the requested output coordinates are either its low 64 bits, its high 64 bits, or both. Coordinate selection from a uniform 128-bit vector is uniform on the selected 64 or 128 bits.
+
+Therefore
+
+```text
+(G(i1), ..., G(it))
+```
+
+is exactly uniform over
+
+```text
+({0,1}^64)^t.
+```
+
+For a fixed ChaCha stream,
+
+```text
+(R(i1), ..., R(it))
+```
+
+is exactly uniform as well, because XOR with the fixed ChaCha vector is a bijection.
+
+So the production theorem remains:
+
+> **Any selection of at most 512 distinct `uint64_t` positions in the supported `2^128`-word stream is jointly uniform over the full GF coefficient seed space.**
+
+---
+
+## 2.3 Exact seed-space counting
+
+The GF seed contains
+
+```text
+65536 bits.
+```
+
+For `t <= 512` selected 64-bit output positions, every possible `t`-tuple has exactly
+
+```text
+2^(65536 - 64*t)
+```
+
+GF-seed preimages, for every fixed ChaCha stream.
+
+In particular, for exactly 512 selected words, every possible 32768-bit tuple occurs exactly `2^32768` times over the complete GF seed space.
+
+There is also a useful stronger **structured** statement. Take 512 distinct GF evaluation points and expose both halves of each. The resulting 1024-word / 65536-bit tuple is exactly uniform, and every such tuple has exactly one GF-seed preimage. For example, output positions `0..1023` have this property.
+
+This does **not** claim arbitrary 1024-wise independence; it says that the full 128 bits of each of 512 independent field evaluations are no longer discarded.
+
+---
+
+## 2.4 Arbitrary positions, not only consecutive outputs
+
+The positions do not need to be adjacent.
+
+For example, any set such as
 
 ```text
 0
 17
 4711
-123456789
+2^64 + 123
+2^100 + 7
 ...
 ```
 
-are just as valid as 512 consecutive positions.
+is valid as long as all selected output positions are distinct and below `2^128`.
 
-The only requirement is that the selected 64-bit positions correspond to distinct field points. Since `uint64_t -> GF(2^64)` is bijective, this holds for distinct positions in
+Unlike the previous low-half-only revision, two adjacent word positions now intentionally share one interpolation point: positions `2j` and `2j+1` use the low and high halves of `P(j)`. This does not weaken the theorem because a uniform 128-bit evaluation provides two jointly uniform 64-bit coordinates.
 
-```text
-0 <= i < 2^64.
-```
+Across the complete supported `2^128`-word stream, the GF component uses evaluation points `0 <= j < 2^127`.
 
-That domain contains `2^64` output words, or 128 EiB of output data.
+---
 
-## 2.3 XOR with a fixed ChaCha stream preserves the exact guarantee
+## 2.5 Seed-space cost and information use
 
-Fix any ChaCha key and any set of `t <= 512` output positions. At those positions ChaCha contributes some fixed vector
+Exact 512-wise independence of arbitrary 64-bit words requires at least
 
 ```text
-C = (C1, ..., Ct).
+512 * 64 = 32768 seed bits
 ```
 
-The GF component contributes an exactly uniform vector `G`.
+in any exact family.
 
-The hybrid produces
+ChaCha20GF512 uses
 
 ```text
-R = C XOR G.
+512 * 128 = 65536 GF seed bits.
 ```
 
-Because XOR with a fixed vector is a bijection, `R` is exactly uniform too.
+So the seed is still larger than the information-theoretic minimum needed for the **arbitrary-512-word** theorem. The 128-bit coefficients are retained because the construction works over `GF(2^128)`, which gives a huge evaluation domain and maps naturally to PCLMUL-accelerated arithmetic.
 
-So the 512-wise guarantee does **not** depend on ChaCha20 being cryptographically secure. Even a completely known fixed mask cannot destroy it.
+The previous revision then threw away half of every 128-bit evaluation. The current revision does not: 512 evaluations provide 1024 output words, so an aligned 1024-word block can expose all 65536 bits of GF-seed dimension exactly.
 
-If the ChaCha key is also random, the same probabilistic guarantee holds when the ChaCha key and GF seed are sampled independently.
-
-## 2.4 Information-theoretically minimal GF seed size
-
-Exact 512-wise independence of 64-bit words requires all
-
-```text
-2^32768
-```
-
-possible joint outcomes of 512 selected words to be representable with equal probability.
-
-Therefore any exact construction needs at least
-
-```text
-32768 seed bits.
-```
-
-The GF component uses exactly 32768 bits.
-
-Thus, **with respect to seed-space size, the GF construction reaches the information-theoretic lower bound for exact 512-wise independence of 64-bit words.**
+At 8192 bytes, the GF coefficient vector remains small in ordinary software terms.
 
 ---
 
 # 3. Where the exact guarantee stops
 
-The GF component is deliberately simple and algebraic. It is linear in its 512 field coefficients.
+The full `GF(2^128)` polynomial evaluations are exactly 512-wise independent as 128-bit variables and are not a general cryptographic PRG. Once enough full evaluations are known, the polynomial is algebraically reconstructible.
 
-For any fixed set of **513 distinct positions**, the map
+For 513 selected **full 128-bit field evaluations**, there is necessarily a non-trivial GF-linear relation because the polynomial has only 512 field coefficients.
 
-```text
-(a0, ..., a511) -> (P(x1), ..., P(x513))
-```
+The production stream now exposes both halves of an evaluation at adjacent positions. Consequently, 1024 appropriately paired words can reveal 512 complete evaluations, and an additional complete evaluation makes the GF-only algebraic dependence explicit. For example, 1026 consecutive words starting at an even position contain 513 complete field evaluations.
 
-maps a 512-dimensional vector space into a 513-dimensional one. Its image cannot fill the entire output space.
+That still does **not** prove that arbitrary 513 distinct 64-bit output positions fail to be independent. A set of 513 words can choose only one 64-bit coordinate from each of 513 distinct field points, and projection can hide full-field linear relations. Therefore this README keeps the conservative theorem that is directly proved:
 
-Consequently, for every chosen set of 513 positions there exists a non-trivial GF-linear relation
+> **At least 512-wise independence of arbitrary 64-bit output words.**
 
-```text
-lambda1*P(x1) + ... + lambda513*P(x513) = 0
-```
+The GF seed contains 65536 bits, so pure seed counting rules out exact arbitrary independence beyond 1024 64-bit words. The exact maximum order between 512 and 1024 remains a separate algebraic question.
 
-that holds for **every** GF seed; the coefficients depend only on the selected positions.
-
-This is exactly why the GF component alone is not a general-purpose cryptographic PRG. Once enough unmasked evaluations are known, the polynomial can be reconstructed by interpolation.
-
-The intended division of labor is therefore:
-
-| Component | What it provides | Where it stops |
-|---|---|---|
-| GF polynomial | Exact information-theoretic independence through 512 output words | Explicit algebraic structure exists beyond that order |
-| ChaCha20 | Computational pseudorandomness with no known efficient distinguisher | No comparable exact high-order independence follows from a 256-bit key space |
-| ChaCha20GF512 | Both guarantees coexist | Larger state and lower throughput than ChaCha20 alone |
-
-This boundary is part of the design, not something hidden by it.
+Beyond the finite exact guarantee, the intended pseudorandomness argument comes from the ChaCha/HChaCha component.
 
 ---
 
-# 4. What relies on the ChaCha20 assumption
+# 4. What relies on the ChaCha/HChaCha assumption
 
-The exact 512-wise result above is unconditional once the GF seed is sampled as specified.
+The exact 512-wise result is unconditional once the GF coefficients are sampled as specified.
 
-The claim beyond that finite exact order is different: it relies on ChaCha20 being computationally pseudorandom.
+The computational claim is different.
 
-Let `C` be a ChaCha20 stream and `G` an independently generated GF stream. Suppose an efficient distinguisher could distinguish
+The current construction assumes the 20-round HChaCha20 subkey derivation and the 20-round ChaCha core behave as secure pseudorandom primitives in this position-indexed use.
 
-```text
-C XOR G
-```
+This is not a proof of ChaCha20 or HChaCha20 security, and this exact 128-bit-counter composition is not itself a standardized primitive.
 
-from a uniform random stream.
+What XOR gives us is a clean robustness argument once the ChaCha component is modeled as pseudorandom and the GF seed is independent:
 
-Then the same distinguisher could be used against ChaCha20: given a challenge stream `X` that is either ChaCha20 or uniform random, independently sample `G` and give
+- if the ChaCha stream is computationally indistinguishable from random, XOR with an independently generated GF stream cannot make it efficiently distinguishable merely by introducing a fixed reversible translation in the reduction;
+- if one conditions on any fixed ChaCha stream, the exact GF 512-wise theorem remains true.
 
-```text
-X XOR G
-```
+The two guarantees therefore have different failure modes.
 
-to the distinguisher.
+### Graceful degradation
 
-If `X` is uniform random, `X XOR G` is still uniform random. If `X` is ChaCha20, the result is the hybrid construction. Therefore a distinguisher for the hybrid would imply a distinguisher for ChaCha20.
+- A future cryptanalytic break of the ChaCha/HChaCha assumption would not invalidate the exact 512-wise GF theorem.
+- Ignoring the GF theorem beyond its proven order does not remove the computational pseudorandom component.
 
-This is a reduction argument, not a proof that ChaCha20 itself is secure.
-
-## Graceful degradation of guarantees
-
-The two guarantees can fail separately:
-
-- if a future cryptanalytic breakthrough invalidated ChaCha20's computational pseudorandomness assumption, the **exact 512-wise GF guarantee would remain**;
-- if one ignores the GF theorem beyond 512 words, the ChaCha component still supplies the usual computational pseudorandomness argument.
-
-This is one reason for combining two structurally different components.
-
-It does **not** mean the hybrid would remain cryptographically secure after a hypothetical break of ChaCha20; it means only that the information-theoretic 512-wise statement survives.
+This does **not** mean the hybrid would necessarily remain cryptographically secure after a break of ChaCha/HChaCha. It means only that the information-theoretic bounded-independence statement is structurally separate.
 
 ---
 
 # 5. The guarantee is over a generator family
 
-A PRNG instance with a fixed seed is deterministic. After the seed is fixed, there is no probability distribution left inside that one stream.
+A fixed-seed PRNG instance is deterministic.
 
-The phrase
+Therefore
 
 > “ChaCha20GF512 is 512-wise independent”
 
-is therefore shorthand for a statement about the **family of streams obtained by sampling the GF coefficients uniformly**.
+is shorthand for a statement about the family obtained by sampling the GF coefficient vector uniformly.
 
-Equivalently, it is a combinatorial statement over the complete GF seed space.
+Equivalently, it is an exact counting statement over the complete GF seed space.
 
-This distinction matters. ChaCha20GF512 does not somehow turn a deterministic sequence into physical randomness; it constructs a deterministic family with unusually strong exact distribution properties over its initialization space.
+For every fixed ChaCha key and fixed public `stream_id`, every selected set of up to 512 output positions has the same exact uniform distribution when the GF seed ranges uniformly over all coefficient vectors.
+
+The theorem does not claim that a fixed deterministic stream contains physical randomness.
 
 ---
 
 # 6. Word granularity
 
-The exact theorem is stated for **64-bit output words**:
+The exact production theorem is stated for **64-bit output words**:
 
 > Any selection of at most 512 distinct `uint64_t` output positions is jointly uniform.
 
-Since a uniform vector of 512 words contains 32768 uniform bits, arbitrary subsets of bits *inside those same 512 words* inherit the corresponding uniformity.
+Arbitrary subsets of bits inside those same words inherit the corresponding uniformity.
 
-But this should not be confused with the stronger claim
+This should not be confused with the stronger claim
 
 > “Any arbitrary 32768 bit positions anywhere in the whole stream are jointly independent.”
 
-For example, 513 single bits taken from 513 different output words are already outside the proven 512-word guarantee.
+For example, taking one bit from each of more than 512 different output words lies outside the stated theorem even though fewer than 32768 total bits may have been selected.
 
 ---
 
@@ -360,28 +512,28 @@ For example, 513 single bits taken from 513 different output words are already o
 
 ```cpp
 uint8_t chacha_seed[32];
-uint8_t gf_seed[4096];
+uint8_t gf_seed[8192];
 
 ChaCha20GF512FFT rng(chacha_seed, gf_seed);
 ```
 
-The complete explicit seed representation is
+The explicit seed representation is
 
 ```text
-256 ChaCha bits + 32768 GF bits = 33024 bits = 4128 bytes.
+256 ChaCha bits + 65536 GF bits
+= 65792 bits
+= 8224 bytes.
 ```
 
-For the full probabilistic statement:
+For the exact probabilistic statement:
 
-- the 4096-byte GF seed must be uniformly sampled from the full `2^32768` coefficient space;
-- if the ChaCha key is also random, it should be sampled independently of the GF seed;
-- `stream_id` is treated as a fixed/public domain-separation parameter, not as hidden seed entropy.
+- the 8192-byte GF seed must be uniformly sampled from the complete `2^65536` coefficient space;
+- if the ChaCha key is also treated probabilistically, it should be sampled independently of the GF seed;
+- `stream_id` is a public domain-separation parameter, not hidden seed entropy.
 
-There are two related statements:
+For every fixed ChaCha stream, the GF counting theorem already holds.
 
-**Combinatorial:** for every fixed ChaCha stream, every selected `t <= 512` hybrid output tuple has exactly the same number of GF-seed preimages.
-
-**Probabilistic:** if the GF seed is uniform, those selected outputs are exactly jointly uniform random variables.
+---
 
 ## 7.2 64-bit convenience mode
 
@@ -391,34 +543,42 @@ ChaCha20GF512FFT rng(0x123456789ABCDEF0ULL);
 
 This constructor expands one 64-bit value with SplitMix64 to initialize both components.
 
-It exists only for reproducibility, examples, and benchmarks.
+It exists for:
 
-It creates at most
+- deterministic tests;
+- examples;
+- benchmarks;
+- reproducible experiments.
 
-```text
-2^64
-```
+It creates at most `2^64` complete initialized generators, so the full information-theoretic theorem over the explicit GF seed space does **not** apply to this convenience mode.
 
-complete initialized generators. Therefore:
+No deterministic expansion can create 65536 bits of information-theoretic seed entropy from 64 input bits.
 
-- the full 512-wise information-theoretic guarantee does **not** apply;
-- the ChaCha key has at most 64 bits of originating seed entropy, not 256;
-- the independent-seed reduction argument does not apply formally because both components come from the same short seed.
-
-No deterministic expansion can create additional seed entropy or additional reachable initial states.
-
-### Do I really need 4096 bytes of independent seed material?
-
-For the **exact probabilistic 512-wise statement**, yes: the GF coefficient vector must be sampled uniformly from its full `2^32768` space. This is a mathematical initialization model, not a claim that applications routinely collect 32768 bits of fresh physical entropy.
-
-If the 4096-byte GF seed is instead expanded deterministically from a shorter seed using a CSPRNG or KDF, the resulting stream may still be computationally excellent, but the exact information-theoretic 512-wise claim over initialization no longer follows. The distinction is intentional.
+---
 
 ## 7.3 Practical OS-backed initialization
 
-`ChaCha20GF512Seed.h` is an optional convenience header for normal applications. It obtains the complete 4128-byte explicit seed from the operating system:
+`ChaCha20GF512Seed.h` provides practical Windows/Linux initialization.
 
-- Windows: `BCryptGenRandom` with `BCRYPT_USE_SYSTEM_PREFERRED_RNG`;
-- Linux: `getrandom()`.
+It automatically uses
+
+```cpp
+ChaCha20GF512FFT::FULL_SEED_BYTES
+```
+
+so it currently reads exactly 8224 bytes.
+
+Windows:
+
+```text
+BCryptGenRandom(..., BCRYPT_USE_SYSTEM_PREFERRED_RNG)
+```
+
+Linux:
+
+```text
+getrandom()
+```
 
 Example:
 
@@ -429,448 +589,336 @@ auto seed = chacha20gf512_seed::make_os_full_seed();
 ChaCha20GF512FFT rng(seed.data());
 ```
 
-This is the recommended **practical** initialization mode, but it is deliberately not advertised as 33024 bits of fresh physical entropy. Operating-system random APIs are CSPRNG interfaces. The information-theoretic theorem still refers to uniform sampling of the full explicit GF seed space.
+The Linux helper loops until the complete buffer is filled, because `getrandom()` may legally return a partial result for large requests.
 
-The supplied `main.cpp` also contains an optional x86 `RDRAND` seeding demonstration. That code is intentionally kept out of the generator and seed-helper APIs: `RDRAND` is hardware-DRBG output and is shown only as an example, not as part of the ChaCha20GF512 construction or its entropy claim.
+OS-backed CSPRNG output is the recommended practical initialization method.
+
+It should not be confused with a claim that calling the OS API injected 65792 bits of fresh physical entropy. The exact theorem is a statement about uniform sampling of the explicit coefficient space; OS-backed seeding is the practical computational approximation used by normal software.
+
+The supplied `main.cpp` also contains an optional x86 `RDRAND` seeding demonstration. `RDRAND` is not part of the core generator or its formal seed model.
 
 ---
 
 # 8. Fast evaluation with an additive FFT
 
-The first implementation evaluated the degree-511 polynomial independently at each point with Horner's rule:
+Direct Horner evaluation of a degree-511 polynomial would require
 
 ```text
-511 GF multiplications per output word.
+511 GF multiplications per field evaluation.
 ```
 
-That was mathematically simple but expensive.
+The production implementation instead evaluates 512 GF points at once with a 9-stage additive FFT. Those 512 evaluations supply **1024 output words** because both 64-bit halves are used.
 
-The current implementation computes **exactly the same polynomial values** with a 9-stage additive FFT.
-
-For every aligned block
+For an aligned GF evaluation block
 
 ```text
 B = 512*k,
 ```
 
-the 512 evaluation points are
+the field points are
 
 ```text
-{ B, B+1, ..., B+511 }
+B, B+1, ..., B+511.
 ```
 
-and, because the lower nine bits of `B` are zero,
+The corresponding output-word block is
 
 ```text
-B + j = B XOR j    for 0 <= j < 512.
+2B, 2B+1, ..., 2B+1023.
 ```
 
-Addition in `GF(2^64)` is XOR, so these points form the affine subspace
+Because the lower nine bits of `B` are zero,
 
 ```text
-B + span_F2(1, 2, 4, ..., 256).
+B + j = B XOR j
 ```
 
-This is precisely the structure exploited by additive FFTs over characteristic-two finite fields.
+for `0 <= j < 512`. Addition in `GF(2^128)` is XOR, so each aligned evaluation block is an affine 9-dimensional binary subspace.
 
-The 512 monomial coefficients supplied by the seed are converted once during initialization into a normalized subspace/novel polynomial basis. Steady-state evaluation then uses the additive FFT.
+The 512 monomial coefficients are converted once during initialization into a normalized subspace/novel basis. Steady-state evaluation then uses the additive FFT.
 
-Current multiplication count per 512-word GF block:
+The field-operation count per 512 evaluations remains
 
 ```text
-9 stages * 256 butterfly multiplications = 2304
-9 affine-base evaluations                 =   90
-------------------------------------------------
-Total                                      = 2394
+9 FFT stages * 256 butterfly multiplications = 2304
+9 affine-base evaluations                    =   90
+----------------------------------------------------
+Total                                         = 2394
 ```
 
-or approximately
+but those 2394 multiplications now produce 1024 output words, or about
 
 ```text
-4.68 GF multiplications per output word
+2.34 GF multiplications per output word.
 ```
 
-instead of 511 with direct Horner evaluation.
+On x86/x86-64 the fast path uses `PCLMULQDQ`. GCC/Clang now dispatch once per FFT block into a PCLMUL-targeted butterfly routine, so the hot loop no longer crosses the target-attribute boundary for every multiplication. The portable shift/XOR reference path remains available and bit-identical.
 
-The FFT is only an evaluation optimization. **It does not change the mathematical generator.** The supplied test program verifies FFT output bit-for-bit against direct Horner evaluation at fixed and random positions.
+The FFT is only an evaluation optimization. It computes the same polynomial values as direct Horner evaluation.
 
 ---
 
 # 9. Random access and parallelism
 
-Both components are position-indexed:
+Both components are position indexed.
+
+The main API accepts either the full position type
+
+```cpp
+ChaCha20GF512FFT::Position p{low64, high64};
+rng.seek(p);
+```
+
+or the backward-compatible 64-bit overload. A seek does not need any previous outputs, and seeking within the currently cached 1024-word GF block no longer discards that FFT result.
+
+`ChaCha20GF512FFT` also provides
+
+```cpp
+rng.generate(dst, count);
+```
+
+for bulk serial generation. The ChaCha component writes full blocks directly into the destination buffer, and the GF layer XORs cached low/high pairs in bulk.
+
+`ChaCha20GF512Parallel.h` provides parallel bulk generation over the **same logical stream**. It does not create multiple RNG streams. Instead:
+
+1. the requested position interval is split into disjoint ranges;
+2. worker boundaries are aligned to 1024-output-word / 512-evaluation FFT blocks where possible;
+3. each worker copies the prototype generator and seeks to its own start position;
+4. all worker results are written into their original places in the output buffer;
+5. worker exceptions are captured and rethrown in the calling thread rather than escaping through `std::thread`.
+
+Therefore
 
 ```text
-ChaCha block = ChaCha20(key, block_counter)
-GF word      = P(word_position)
+parallel output == serial output
 ```
 
-so previous outputs are not needed to compute a later one.
-
-The API provides
-
-```cpp
-rng.seek(position);
-```
-
-and independent 512-word ranges can be evaluated independently, making parallel evaluation conceptually straightforward.
-
-The FFT implementation caches one aligned 512-word GF block. A seek to another block recomputes only the target block.
-
-`ChaCha20GF512Parallel.h` adds a bulk parallel convenience wrapper:
-
-```cpp
-#include "ChaCha20GF512Parallel.h"
-
-ChaCha20GF512Parallel rng(full_seed);
-std::vector<uint64_t> values(1'000'000);
-rng.fill_parallel(values.data(), values.size(), 4);
-```
-
-This does **not** create or combine multiple random streams. Workers evaluate disjoint position ranges of the same logical stream. Range splitting is aligned to 512-word FFT blocks where possible, so the parallel result is bit-identical to serial generation while avoiding duplicated FFT work at worker boundaries.
-
-A `fill_parallel_at()` overload provides position-indexed bulk generation, and a thread count of zero selects `std::thread::hardware_concurrency()`. Thread creation is intentionally outside the core RNG; the wrapper is aimed at large bulk requests, not individual `next_int()` calls.
+bit-for-bit, including across the `2^64` boundary of the 128-bit output position.
 
 ---
 
 # 10. Performance
 
-The current implementation was benchmarked on two x86-64 CPUs under both
-Windows/MSVC and Linux/GCC. All runs below used one million `uint64_t`
-outputs, `PCLMULQDQ` runtime support, and the same deterministic benchmark
-seed/stream. The single-threaded and parallel hybrid runs produce the same
-logical output stream.
+The main performance changes in this revision are:
 
-## Summary
+- one 512-point GF FFT now supplies 1024 output words by using both halves;
+- GCC/Clang PCLMUL butterflies stay inside one target-specific hot loop;
+- ChaCha buffering uses native `uint64_t` words rather than bytewise store/load reconstruction;
+- a bulk `generate()` API removes most per-word bookkeeping in bulk/parallel use;
+- seeking within the same GF block preserves the FFT cache.
 
-| CPU / toolchain | ChaCha20Counter64 | ChaCha20GF512 FFT single | ChaCha20GF512 FFT parallel x4 |
-|---|---:|---:|---:|
-| Intel Core i7-4790K / Windows MSVC | 41.160 M/s | 18.769 M/s | 68.618 M/s |
-| Intel Core i7-4790K / Linux GCC | 76.581 M/s | 35.020 M/s | 77.172 M/s |
-| AMD Ryzen 9 5900X / Windows MSVC | 53.550 M/s | 31.630 M/s | 105.258 M/s |
-| AMD Ryzen 9 5900X / Linux GCC | 99.554 M/s | 43.846 M/s | 140.903 M/s |
+A representative run in the current test environment (AMD EPYC 9V74, GCC 14.2, `-O3`) with 30 million words produced approximately:
 
-The compiler/toolchain has a substantial effect on this implementation,
-especially on the scalar ChaCha20 path. The benchmark numbers should therefore
-be read as measurements of these particular builds, not as universal ratios.
+| Generator | M `uint64_t`/s | MiB/s |
+|---|---:|---:|
+| `ChaCha20Counter128` | 56.8 | 433 |
+| `ChaCha20GF512 FFT single` (`next_int`) | 26.5 | 203 |
+| `ChaCha20GF512 FFT bulk` | 30.3 | 231 |
+| `ChaCha20GF512 FFT parallel x4` | 98.5 | 751 |
 
-## Intel Core i7-4790K (Haswell) — Windows / MSVC
-
-```text
-PCLMUL runtime support:    yes
-sizeof(ChaCha20GF512FFT):    13920 bytes
-ChaCha 64/64 test vector:  OK
-GF arithmetic fast/ref:    OK
-FFT vs Horner:             OK
-Hybrid seek test:          OK
-Parallel identity x4:      OK
-OS random seed demo:       OK
-RDRAND seed demo:          OK
-
-Generator                              M uint64/s       MiB/s
-----------------------------------------------------------------
-ChaCha20Counter64                         41.160       314.028
-ChaCha20GF512 FFT single                    18.769       143.195
-ChaCha20GF512 FFT parallel x4               68.618       523.511
-```
-
-The single-threaded hybrid reaches about **45.6%** of scalar ChaCha20
-throughput, or is roughly **2.19x** slower.
-
-The 4-thread bulk path is about **3.66x** faster than the hybrid single-thread
-run, corresponding to roughly **91%** of ideal 4-thread scaling.
-
-## Intel Core i7-4790K (Haswell) — Linux / GCC
-
-Built with:
-
-```bash
-g++ -std=c++17 -O3 -pthread main.cpp -o chacha20gf512
-```
-
-Measured result:
-
-```text
-PCLMUL runtime support:    yes
-sizeof(ChaCha20GF512FFT):    13920 bytes
-ChaCha 64/64 test vector:  OK
-GF arithmetic fast/ref:    OK
-FFT vs Horner:             OK
-Hybrid seek test:          OK
-Parallel identity x4:      OK
-OS random seed demo:       OK
-RDRAND seed demo:          OK
-
-Generator                              M uint64/s       MiB/s
-----------------------------------------------------------------
-ChaCha20Counter64                         76.581       584.270
-ChaCha20GF512 FFT single                    35.020       267.182
-ChaCha20GF512 FFT parallel x4               77.172       588.779
-```
-
-The single-threaded hybrid reaches about **45.7%** of scalar ChaCha20
-throughput. The 4-thread path is about **2.20x** faster than the hybrid
-single-thread run.
-
-This result is also a useful reminder that WSL/Linux itself is not inherently
-a performance obstacle for this CPU-bound code: the GCC build is substantially
-faster than the measured MSVC build on the same physical processor.
-
-## AMD Ryzen 9 5900X (Zen 3) — Windows / MSVC
-
-```text
-PCLMUL runtime support:    yes
-sizeof(ChaCha20GF512FFT):    13920 bytes
-ChaCha 64/64 test vector:  OK
-GF arithmetic fast/ref:    OK
-FFT vs Horner:             OK
-Hybrid seek test:          OK
-Parallel identity x4:      OK
-OS random seed demo:       OK
-RDRAND seed demo:          OK
-
-Generator                              M uint64/s       MiB/s
-----------------------------------------------------------------
-ChaCha20Counter64                         53.550       408.550
-ChaCha20GF512 FFT single                    31.630       241.317
-ChaCha20GF512 FFT parallel x4              105.258       803.052
-```
-
-The single-threaded hybrid reaches about **59.1%** of scalar ChaCha20
-throughput, or is roughly **1.69x** slower.
-
-The 4-thread bulk path is about **3.33x** faster than the hybrid single-thread
-run, corresponding to roughly **83%** of ideal 4-thread scaling.
-
-## AMD Ryzen 9 5900X (Zen 3) — Linux / GCC
-
-Built with the same GCC command shown above.
-
-```text
-PCLMUL runtime support:    yes
-sizeof(ChaCha20GF512FFT):    13920 bytes
-ChaCha 64/64 test vector:  OK
-GF arithmetic fast/ref:    OK
-FFT vs Horner:             OK
-Hybrid seek test:          OK
-Parallel identity x4:      OK
-OS random seed demo:       OK
-RDRAND seed demo:          OK
-
-Generator                              M uint64/s       MiB/s
-----------------------------------------------------------------
-ChaCha20Counter64                         99.554       759.538
-ChaCha20GF512 FFT single                    43.846       334.516
-ChaCha20GF512 FFT parallel x4              140.903      1075.005
-```
-
-The single-threaded hybrid reaches about **44.0%** of scalar ChaCha20
-throughput, or is roughly **2.27x** slower.
-
-The 4-thread bulk path is about **3.21x** faster than the hybrid single-thread
-run, corresponding to roughly **80%** of ideal 4-thread scaling. Its measured
-throughput is about **1.05 GiB/s**.
-
-## Effect of the additive FFT
-
-The original direct-Horner version of exactly the same GF512 construction
-produced only about
-
-```text
-1.433 M uint64/s
-```
-
-on the i7-4790K Windows benchmark.
-
-The final FFT version on that same Windows/MSVC system reaches
-
-```text
-18.769 M uint64/s single-threaded
-68.618 M uint64/s with four threads
-```
-
-without changing the generated sequence or the mathematical guarantees.
-
-Thus, on that machine, the additive FFT improves the complete hybrid by about
-**13.1x** single-threaded, while the 4-thread implementation is about
-**47.9x** faster than the original Horner prototype.
-
-## Interpreting the benchmark
-
-These numbers are not intended as universal performance claims. They mainly
-show that:
-
-1. exact 512-wise independence is no longer prohibitively expensive once the
-   polynomial is evaluated with an additive FFT;
-2. both components are position-addressable, so bulk generation parallelizes
-   naturally;
-3. the parallel implementation computes **the same logical stream** as serial
-   generation rather than combining independent per-thread RNG streams;
-4. compiler code generation matters substantially for this workload.
-
-The benchmark `sink` value is identical for serial and parallel generation.
-That is a useful implementation sanity check: optimization and parallelization
-do not change the generated sequence.
-
-CPU architecture, compiler version, optimization flags, clocking, PCLMUL
-implementation, thread scheduling, and future SIMD versions can all change
-these ratios.
+A separate tight single-thread microbenchmark on the same machine measured the old revision at about 17 M words/s and the current revision at about 31 M words/s. Treat these as implementation measurements, not universal performance claims: CPU frequency, virtualization, compiler, PCLMUL throughput and thread scheduling matter substantially.
 
 ---
 
 # 11. Memory footprint
 
-The mathematical GF seed/state is exactly
+The current implementation stores 128-bit field elements.
+
+Major 512-element arrays are therefore:
 
 ```text
-4096 bytes.
+monomial coefficient copy   512 * 16 = 8192 bytes
+novel-basis coefficient set 512 * 16 = 8192 bytes
+FFT result cache            512 * 16 = 8192 bytes
 ```
 
-The FFT implementation additionally caches one 512-word evaluated block:
+plus:
+
+- subspace-polynomial tables;
+- normalization constants;
+- ChaCha state and block buffer;
+- position/cache bookkeeping.
+
+A current build reports
 
 ```text
-4096 bytes.
+sizeof(ChaCha20GF512FFT) = 27664 bytes.
 ```
 
-The implementation also retains the original 4096-byte monomial coefficient
-vector used by the reference Horner evaluator. This copy is intentionally kept
-in the class unconditionally so that the header-only `ChaCha20GF512FFT` type
-has exactly the same definition and object layout in every translation unit
-and precompiled header.
+The retained monomial copy is used by the reference Horner path and also keeps one stable header-only class layout in all translation units.
 
-The current GCC x86-64 build therefore reports
-
-```text
-13920 bytes
-```
-
-for `sizeof(ChaCha20GF512FFT)`.
-
-Earlier development versions conditionally removed the 4096-byte Horner copy
-with a preprocessor macro. That made the class layout depend on compilation
-settings and could create an ODR/layout mismatch if different translation
-units or precompiled headers saw different macro states. The current version
-uses one stable layout everywhere.
-
-A future cleanup could move the reference Horner state into a separate
-test-only type without changing the production class definition.
-
-These sizes are implementation details, not part of the mathematical construction.
+These sizes are implementation details, not part of the mathematical theorem.
 
 ---
 
 # 12. Validation
 
-The supplied benchmark/test program currently checks:
+The supplied `main.cpp` checks the current production implementation in several independent ways. A representative successful run includes:
 
-- a known zero-key / zero-nonce ChaCha20 64/64 test vector;
-- portable GF multiplication against the PCLMUL implementation;
-- basic field identities such as distributivity and multiplication by one;
-- additive FFT results against direct Horner evaluation for multiple unrelated coefficient sets;
-- fixed boundary positions and random 64-bit positions;
-- random-access `seek()` against sequential generation;
-- serial versus parallel bulk generation at an unaligned starting position.
+```text
+PCLMUL runtime support:    yes
+sizeof(ChaCha20GF512FFT):  27664 bytes
+Full seed size:            8224 bytes
+GF seed size:              8192 bytes
+ChaCha128 regression vec:  OK
+Hybrid regression vector: OK
+GF(2^128) fast/ref:        OK
+GF128 FFT vs Horner:       OK
+Hybrid 128-bit seek:       OK
+Bulk vs next_int:          OK
+Parallel identity x4:      OK
+```
 
-The FFT and Horner paths produce the same hybrid stream bit-for-bit, and the parallel wrapper produces the same logical stream as serial generation.
+The important implementation checks are:
 
-A useful additional repository test is an **exhaustive miniature demonstration** over a small field, for example `GF(2^4)` with `k = 4`. There are only `2^16 = 65536` coefficient seeds, so one can enumerate the entire seed space and visibly verify that, at any four selected distinct field points, every possible four-tuple occurs exactly once.
+### ChaCha regression
 
-That toy test is not needed for the proof, but it is an unusually transparent executable illustration of the theorem used by the real generator.
+A fixed vector makes unintended changes to the position-indexed ChaCha component visible.
+
+### Full hybrid regression
+
+A second known-answer vector covers the complete `ChaCha XOR GF` stream. This catches accidental stream changes that a GF-vs-Horner test alone cannot detect.
+
+### GF multiplication
+
+The portable `GF(2^128)` multiplication is checked against the PCLMUL implementation.
+
+### FFT vs. Horner
+
+The additive FFT is compared bit-for-bit with direct polynomial evaluation, including positions with a nonzero high 64-bit limb.
+
+### 128-bit seek, bulk and serial/parallel identity
+
+Random access is checked against sequential generation across the low-64-bit carry. The bulk API is compared against repeated `next_int()` calls at ordinary positions, 1024-word GF boundaries, across the low-64-bit carry and exactly at the final position `2^128-1`. Parallel generation is checked against the same serial logical stream.
+
+### Toy-model theorem test
+
+`toy_kwise_test.h` exhaustively checks scaled-down versions of the construction:
+
+```text
+(A) k-wise independence
+(B) sharpness of the unprojected polynomial construction at k+1
+(C) invariance under XOR with an arbitrary fixed position-dependent mask
+(D) negative control with a reducible polynomial
+(E) projection from a larger field element to a smaller output word
+(F) splitting each field value into low/high adjacent output halves
+```
+
+The new `(F)` check mirrors the production change with `GF(2^4)`: each 4-bit field evaluation is split into two 2-bit output words, and mixed selections (including both halves of one evaluation) are verified to remain exactly uniform.
+
+The demo uses the quick toy mode by default. Passing `full` as the third command-line argument after count and thread count runs the complete GF(2^4) checks plus the sampled GF(2^8) checks. The GF(2^8) sharpness test now stores only the `2^24` generated 32-bit tuples (64 MiB) rather than allocating a 512-MiB bitmap for the full `2^32` tuple universe.
+
+A full run of the revised tests passes.
 
 ---
 
 # 13. Portability and build
 
-The implementation is C++17 and is intended to build with MSVC, GCC, and
-Clang.
+The project is C++17 and is intended for:
 
-On x86/x86-64 it detects `PCLMULQDQ` at runtime. GCC/Clang use a
-function-specific target attribute plus `__builtin_cpu_supports("pclmul")`,
-so the complete program does **not** need to be compiled globally with
-`-mpclmul`.
+- Visual Studio 2022 / MSVC;
+- GCC;
+- Clang.
+
+On x86/x86-64 it detects `PCLMULQDQ` at runtime.
+
+GCC/Clang use a function-specific target attribute together with
+
+```cpp
+__builtin_cpu_supports("pclmul")
+```
+
+so the complete program does not need to be compiled globally with `-mpclmul`.
+
+The MSVC path uses the corresponding x86/x64 intrinsics.
 
 ## Direct GCC build
-
-The project is header-only apart from the example/test `main.cpp`, so a direct
-Linux build needs only one compilation command:
 
 ```bash
 g++ -std=c++17 -O3 -pthread main.cpp -o chacha20gf512
 ./chacha20gf512 1000000 4
 ```
 
-The second command-line argument is the thread count used by the parallel
-benchmark.
-
-To force the portable shift/XOR multiplication path for validation:
+To force the portable GF path:
 
 ```bash
 g++ -std=c++17 -O3 -pthread -DCHACHA20GF512_FORCE_PORTABLE \
     main.cpp -o chacha20gf512-portable
 ```
 
-The portable path computes the same field and the same output stream; it is
-only slower.
+The portable path must produce the same stream; it is only slower.
 
-## CMake build
+## CMake
 
-A small `CMakeLists.txt` is supplied for users who prefer a conventional
-cross-platform build:
+If the supplied `CMakeLists.txt` is used:
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ```
 
-On multi-configuration generators such as Visual Studio, `--config Release`
-selects the optimized configuration. On Linux with Makefiles or Ninja,
-`CMAKE_BUILD_TYPE=Release` selects the release flags at configure time.
-
-To build the portable GF multiplication path through CMake:
-
-```bash
-cmake -S . -B build-portable \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCHACHA20GF512_FORCE_PORTABLE=ON
-cmake --build build-portable --config Release
-```
-
-CMake links the platform requirements used by the convenience layer:
-`Threads::Threads` for the parallel wrapper and `bcrypt` on Windows for
-`BCryptGenRandom`.
-
-All seed serialization and `uint64_t` output interpretation are explicitly
-little-endian, so reproducible numeric streams do not depend on host
-endianness.
+On Visual Studio generators, `--config Release` selects the optimized configuration.
 
 ---
 
-# 14. API example
+# 14. API examples
+
+## Full explicit seed
 
 ```cpp
 #include "ChaCha20GF512FFT.h"
 
-uint8_t chacha_seed[32] = { /* 32 independent seed bytes */ };
-uint8_t gf_seed[4096]   = { /* full GF coefficient seed */ };
+uint8_t chacha_seed[ChaCha20GF512FFT::CHACHA_SEED_BYTES] = {};
+uint8_t gf_seed[ChaCha20GF512FFT::GF_SEED_BYTES] = {};
 
 ChaCha20GF512FFT rng(chacha_seed, gf_seed);
 
 uint64_t a = rng.next_int();
 uint64_t b = rng.next_int();
 
-rng.seek(1000000);
+std::vector<uint64_t> block(4096);
+rng.generate(block.data(), block.size());
+```
+
+## 128-bit random access
+
+```cpp
+ChaCha20GF512FFT::Position p{
+    0x0123456789abcdefULL,   // low 64 bits
+    0x0000000000000001ULL    // high 64 bits
+};
+
+rng.seek(p);
 uint64_t x = rng.next_int();
 ```
 
-For deterministic tests only:
+## Backward-compatible 64-bit seek
 
 ```cpp
-ChaCha20GF512FFT rng(123456789ULL);
+rng.seek(1'000'000ULL);
 ```
 
-For practical OS-backed seeding and parallel bulk generation, include the optional convenience headers `ChaCha20GF512Seed.h` and `ChaCha20GF512Parallel.h`. They do not change the mathematical generator.
+## Practical OS-backed seed
 
-The short constructor is a convenience API and must not be confused with the full theoretical initialization model.
+```cpp
+#include "ChaCha20GF512Seed.h"
+
+auto seed = chacha20gf512_seed::make_os_full_seed();
+ChaCha20GF512FFT rng(seed.data());
+```
+
+## Parallel generation of the same stream
+
+```cpp
+#include "ChaCha20GF512Parallel.h"
+
+ChaCha20GF512Parallel prng(seed.data());
+
+std::vector<uint64_t> values(1'000'000);
+prng.fill_parallel(values.data(), values.size(), 4);
+```
+
+The parallel wrapper also accepts the 128-bit `Position` type for `seek()` and `fill_parallel_at()`.
 
 ---
 
@@ -879,94 +927,159 @@ The short constructor is a convenience API and must not be confused with the ful
 ChaCha20GF512 does **not** claim:
 
 - to be empirically “more random than ChaCha20”;
+- to replace established cryptographic standards;
 - to be the fastest or smallest PRNG;
-- full independence of an unlimited output stream;
-- exact independence beyond 512 distinct output words;
-- exact independence for arbitrary 32768 individual bit positions spread over more than 512 words;
+- unlimited output;
+- that the 64-bit output values have a proven minimal period of `2^128`;
+- that output words never repeat;
+- exact independence beyond the proven 512-word order;
+- that 513-wise independence of the split-half 64-bit stream has been proved false;
+- independence of arbitrary bit sets spread across more than 512 output words;
 - that the GF component increases ChaCha20's cryptographic key strength;
-- that a short seed expanded to 4128 bytes gains 33024 bits of entropy;
+- that an OS call returning 8224 bytes injected 65792 bits of fresh physical entropy;
+- that the 64-bit convenience constructor obtains the full-seed theorem;
 - backtracking resistance after compromise of a stateful DRBG state;
-- a maximal-period theorem for the combined generator;
 - cryptographic audit or suitability as a drop-in system CSPRNG;
-- novelty of ChaCha20, polynomial `k`-wise independence, additive FFTs, or XOR-combiner reasoning;
+- novelty of ChaCha20, HChaCha20, polynomial `k`-wise independence, additive FFTs, GHASH-style field arithmetic or XOR-combiner reasoning;
 - universal mathematical optimality across every conceivable RNG property.
 
-The phrase **“Maximizing What Can Be Proven About a PRNG”** describes the design motivation, not a theorem that no other construction can optimize some different criterion further.
+The phrase
+
+> **“Maximizing What Can Be Proven About a PRNG”**
+
+describes the design motivation, not a theorem of universal optimality.
 
 ---
 
 # 16. FAQ / likely objections
 
-## “Isn't this pointless? ChaCha20 already passes statistical tests.”
+## “Why use GF(2^128) if the public output is 64-bit words?”
 
-For most practical applications, ChaCha20 alone is already more than sufficient.
+Because the polynomial construction needs a large field for both coefficients and interpolation points, and `GF(2^128)` is especially convenient on modern CPUs because carry-less multiplication is directly accelerated.
 
-That is exactly why this project asks a different question: **after empirical testing stops providing a useful ranking, can useful exact guarantees still be added?**
+The current mapping also uses the field width completely: each uniform 128-bit evaluation becomes two adjacent 64-bit output words. A `2^128`-word stream therefore consumes `2^127` distinct GF evaluation points, still far below the `2^128` available points.
 
-ChaCha20GF512 adds an information-theoretic property that a 256-bit-key ChaCha20 family with fixed/public stream ID provably cannot have.
+---
 
-## “Isn't the GF part just linear and therefore weak?”
+## “Is 2^128 the period?”
+
+Not in the traditional recurrence-generator sense.
+
+The implementation defines a non-wrapping position domain of exactly `2^128` words. Every position is unique, and generation stops rather than reusing position zero.
+
+No claim is made that the sequence of 64-bit values has minimal period `2^128`.
+
+The practical requirement motivating the change was simpler:
+
+> **period exhaustion or counter wrap should be impossible in any physically meaningful use.**
+
+A `2^128`-word non-wrapping stream meets that requirement by an enormous margin.
+
+---
+
+## “Why not add an even larger-period LFSR?”
+
+A separate maximal-period component could make a larger formal cycle, but the exact polynomial guarantee would still be tied to its finite set of distinct field positions.
+
+The current design instead makes the exact theorem valid over the complete supported stream and then stops cleanly at the end of that domain.
+
+That is simpler to state and prove.
+
+---
+
+## “Does splitting 128 bits into two 64-bit words waste randomness?”
+
+No field bits are discarded now.
+
+For each evaluation `P(j)`, output position `2j` uses the low 64 bits and `2j+1` uses the high 64 bits. Together those two words contain the complete 128-bit field value.
+
+If only one half is selected in a theorem query, it is a uniform 64-bit projection. If both halves are selected, they are jointly the original uniform 128-bit value.
+
+---
+
+## “Why does the GF seed double?”
+
+A degree-511 polynomial still has 512 coefficients, but each coefficient is now a 128-bit field element:
+
+```text
+512 * 128 = 65536 bits.
+```
+
+The extra seed space pays for the larger field and therefore the larger distinct-position domain.
+
+---
+
+## “Is the new seed size minimal?”
+
+Not for the statement “arbitrary 512 output words are independent.” That theorem has a lower bound of 32768 GF seed bits, while this construction uses 65536.
+
+However, the current split-half mapping no longer throws away the extra dimension. For 512 distinct evaluation points with both halves exposed (1024 output words), the 65536 output bits are exactly uniform and use the complete 65536-bit GF seed space one-to-one.
+
+That structured fact must not be confused with arbitrary 1024-wise independence.
+
+---
+
+## “Could the 64-bit output actually be more than 512-wise independent?”
+
+Possibly.
+
+The stream now exposes low and high coordinates at adjacent positions, but a set of more than 512 words may still choose only one coordinate from each of more than 512 distinct field evaluations. Those projections can hide relations that exist between the full 128-bit evaluations.
+
+This project therefore proves and tests the conservative statement that **512-wise independence definitely holds**, while seed counting gives an absolute upper bound of 1024. The exact maximum order in between remains open here.
+
+---
+
+## “Why use HChaCha20?”
+
+A full 128-bit ChaCha block index needs all four state words 12..15.
+
+HChaCha20 moves stream separation into the derived key instead:
+
+```text
+subkey = HChaCha20(key, stream_id || 0)
+```
+
+so words 12..15 remain completely available for position addressing.
+
+---
+
+## “Why not derive the 8192-byte GF seed from the ChaCha key?”
+
+Because deterministic expansion of a 256-bit key reaches at most `2^256` GF coefficient vectors.
+
+The exact information-theoretic theorem stated here is a counting theorem over the complete explicit GF coefficient space.
+
+A KDF/CSPRNG expansion from a short seed may be computationally excellent, but it does not create the missing information-theoretic seed space.
+
+---
+
+## “Isn't the GF part algebraically weak?”
 
 Yes, deliberately.
 
-The GF polynomial is not intended to hide its structure. Its value is that its bounded-independence property is exact and easy to prove. Beyond 512 words it has algebraic relations, and enough unmasked evaluations determine the polynomial.
+Bounded independence and cryptographic pseudorandomness are different properties.
 
-ChaCha20 is the component intended to mask that structure computationally.
+The GF polynomial is included because its finite-order distribution property is exact and transparent. ChaCha is included to provide the computationally pseudorandom mask.
 
-## “Why not use the GF polynomial alone?”
-
-Because exact bounded independence and computational pseudorandomness are different properties.
-
-GF512 gives an exact theorem through 512 output words, but is algebraically predictable beyond its seed dimension. ChaCha20 provides the complementary computational property.
-
-## “Why not derive the 4096-byte GF seed from the ChaCha key?”
-
-Because a deterministic expansion of a 256-bit key reaches at most `2^256` GF states.
-
-The exact 512-wise theorem requires access to the full `2^32768` coefficient space. Expanding a short seed can produce excellent pseudorandom-looking bytes, but it cannot create the missing information-theoretic seed space.
-
-## “Why no ChaCha rekeying?”
-
-Rekeying is a mechanism used by some stateful DRBGs for properties such as backtracking resistance after state compromise.
-
-ChaCha20GF512 instead uses standard counter-indexed ChaCha20 as a pseudorandom stream component. Backtracking resistance is orthogonal to the exact distribution question studied here and would complicate random access and the construction's analysis without strengthening the stated 512-wise theorem.
-
-## “Can XOR with GF512 weaken ChaCha20?”
-
-Under the independent-seed model used for the computational reduction, an efficient distinguisher for `ChaCha20 XOR GF512` would give an efficient distinguisher for ChaCha20 itself.
-
-The 64-bit convenience constructor does not satisfy that independent-seed model and therefore carries no such formal claim.
-
-## “What if ChaCha20 is broken in the future?”
-
-The computational pseudorandomness claim would need to be reconsidered.
-
-The exact 512-wise independence theorem supplied by the independently seeded GF component would remain true. That is a limited but genuine form of graceful degradation.
+---
 
 ## “Why exactly 512?”
 
-`k = 512` was chosen as a practical/theoretical balance:
+`k = 512` remains a useful practical/theoretical point:
 
-- 512 independent 64-bit coefficients require exactly 4096 seed bytes;
-- 4096 bytes are still small enough to fit comfortably in modern private caches;
-- the guarantee covers 32768 bits across any 512 selected output words;
-- a 512-point additive FFT maps naturally to a 9-stage power-of-two transform.
+- 512 output words cover 32768 output bits;
+- the polynomial degree is still manageable;
+- 512 evaluation points map naturally to a 9-stage additive FFT;
+- an 8192-byte GF coefficient set is still small in ordinary software;
+- the parallel implementation can split naturally at 1024-output-word boundaries, each backed by one 512-point FFT.
 
-Other values of `k` are mathematically possible. The current implementation fixes 512 to keep the code and the claim concrete.
-
-## “Is the idea mathematically new?”
-
-No claim of novelty is made for the ingredients.
-
-Random-polynomial constructions of `k`-wise independent variables are classical. ChaCha20 is established. Additive FFTs over characteristic-two finite fields are established. XOR-combiner arguments are established.
-
-The project is an experimental composition of these ideas around a specific design goal: **combine computational pseudorandomness with a high-order exact distribution guarantee and make both roles explicit in a small implementation.**
+Other values of `k` are mathematically possible.
 
 ---
 
 # 17. Repository layout
 
-A minimal repository can remain deliberately small:
+The current repository consists of:
 
 ```text
 README.md
@@ -974,100 +1087,116 @@ CMakeLists.txt
 ChaCha20GF512FFT.h
 ChaCha20GF512Parallel.h
 ChaCha20GF512Seed.h
+toy_kwise_test.h
 main.cpp
 ```
 
-The roles are intentionally separated:
+Roles:
 
-- `CMakeLists.txt` provides an optional cross-platform build;
-- `ChaCha20GF512FFT.h` contains the actual generator and its mathematical core;
-- `ChaCha20GF512Parallel.h` adds optional bulk parallel generation of the same
-  logical stream;
-- `ChaCha20GF512Seed.h` adds practical Windows/Linux OS-backed seed acquisition;
-- `main.cpp` is both example program and validation/benchmark driver.
+- `ChaCha20GF512FFT.h` — generator, GF arithmetic, additive FFT, ChaCha/HChaCha position logic;
+- `ChaCha20GF512Parallel.h` — bulk parallel generation of the same logical stream;
+- `ChaCha20GF512Seed.h` — practical Windows/Linux OS-backed seed acquisition;
+- `toy_kwise_test.h` — exhaustive small-field verification of the mathematical construction;
+- `main.cpp` — validation, seed demonstrations and benchmarks;
+- `CMakeLists.txt` — optional cross-platform build.
 
-The core generator has no dependency on threading, OS random APIs, or
-`RDRAND`.
-
-## Example program flow
-
-The supplied `main.cpp` demonstrates the project in roughly this order:
-
-```text
-1. ChaCha20 reference-vector test
-2. GF fast-vs-portable arithmetic test
-3. additive-FFT vs. Horner equivalence test
-4. random-access / seek test
-5. serial-vs-parallel identity test
-6. operating-system seed demonstration
-7. optional RDRAND demonstration
-8. ChaCha20 single-thread benchmark
-9. ChaCha20GF512 single-thread benchmark
-10. ChaCha20GF512 parallel benchmark
-```
-
-`RDRAND` appears only in the example program. It is not part of
-ChaCha20GF512's construction, full-seed theorem, or recommended entropy model.
-The example exists simply because modern x86 hardware randomness is useful
-and interesting to demonstrate separately.
+The core generator itself does not depend on the OS random APIs or on the parallel wrapper.
 
 ---
 
 # 18. Future work
 
-The core construction is intentionally kept simple. Useful extensions include:
+Possible directions include:
 
-- an exhaustive small-field toy proof (`GF(2^4)`, `k=4`);
-- PractRand and TestU01/BigCrush as implementation sanity checks rather than proofs;
-- benchmarks on newer x86 and ARM CPUs;
-- SIMD/VPCLMUL acceleration of the additive FFT;
+- VPCLMUL / wider SIMD acceleration of GF(2^128) FFT work;
+- ARM `PMULL` acceleration;
+- reducing the cost of 128-bit field multiplication;
+- more benchmark data across CPUs and compilers;
+- PractRand, TestU01/BigCrush and SmokeRand as implementation sanity checks rather than proofs;
 - parameterizing the independence order `k`;
-- a separately studied **robust computational combiner** variant, e.g. independently seeded ChaCha20 XOR AES-CTR XOR GF512, where computational pseudorandomness could survive failure of either one of the two cryptographic components;
-- more theoretical exploration of complementary unconditional test classes, such as small-bias or space-bounded constructions, without complicating the core generator prematurely.
+- studying the **exact independence order of the split-half 64-bit family above 512**;
+- alternative linear output mappings from each 128-bit field evaluation;
+- independent cryptographic-combiner variants if robustness against failure of one cryptographic primitive becomes a separate design goal.
 
-These are intentionally future directions rather than claims of the present implementation.
+These are possible extensions, not claims of the current implementation.
 
 ---
 
 # 19. References
 
-### ChaCha20
+## ChaCha20
 
-- Daniel J. Bernstein, **“ChaCha, a variant of Salsa20”**, 2008.  
-  https://cr.yp.to/chacha/chacha-20080120.pdf
+Daniel J. Bernstein, **“ChaCha, a variant of Salsa20”**, 2008.  
+https://cr.yp.to/chacha/chacha-20080120.pdf
 
-- Y. Nir and A. Langley, **RFC 8439: ChaCha20 and Poly1305 for IETF Protocols**.  
-  RFC 8439 documents the IETF layout and explicitly notes the original 64-bit-nonce / 64-bit-counter ChaCha layout.  
-  https://www.rfc-editor.org/rfc/rfc8439.html
+Y. Nir and A. Langley, **RFC 8439: ChaCha20 and Poly1305 for IETF Protocols**.  
+RFC 8439 documents the IETF layout and explicitly notes that original ChaCha used a 64-bit nonce and 64-bit block counter.  
+https://www.rfc-editor.org/rfc/rfc8439.html
 
-### k-wise independence
+## HChaCha20 / XChaCha
 
-- James Aspnes, **“k-wise Independence”**, notes on the standard random-polynomial construction over finite fields.  
-  https://www.cs.yale.edu/homes/aspnes/pinewiki/KwiseIndependence.html
+S. Arciszewski, **XChaCha: eXtended-nonce ChaCha and AEAD_XChaCha20_Poly1305**, Internet-Draft.  
+Contains the HChaCha20 construction and output-word selection `0,1,2,3,12,13,14,15`.  
+https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-xchacha
 
-### Additive FFT
+## k-wise independence
 
-- Shuhong Gao and Todd Mateer, **“Additive Fast Fourier Transforms over Finite Fields”**, IEEE Transactions on Information Theory 56(12), 2010.  
-  https://www.math.clemson.edu/~sgao/papers/GM10.pdf
+James Aspnes, **“k-wise Independence”**.  
+Describes the standard random degree-`k-1` polynomial construction over a finite field.  
+https://www.cs.yale.edu/homes/aspnes/pinewiki/KwiseIndependence.html
 
-- Sian-Jheng Lin, Wei-Ho Chung, and Yunghsiang S. Han, **“Novel Polynomial Basis and Its Application to Reed-Solomon Erasure Codes”**.  
-  https://arxiv.org/abs/1404.3458
+## GF(2^128)
 
-### GF(2^64) polynomial
+NIST SP 800-38D, **Recommendation for Block Cipher Modes of Operation: Galois/Counter Mode (GCM) and GMAC**.  
+Defines the 128-bit binary field used by GHASH.  
+https://csrc.nist.gov/pubs/sp/800/38/d/final
 
-- N. Madden, **Generalised SIV Internet-Draft**, table of primitive polynomials and reduction constants; lists  
-  `x^64 + x^4 + x^3 + x + 1` and `0x1B` for `GF(2^64)`.  
-  https://datatracker.ietf.org/doc/html/draft-madden-generalised-siv-00
+## Additive FFT
 
-### GCC runtime dispatch
+Shuhong Gao and Todd Mateer, **“Additive Fast Fourier Transforms over Finite Fields”**, IEEE Transactions on Information Theory 56(12), 2010.  
+https://www.math.clemson.edu/~sgao/papers/GM10.pdf
 
-- GCC documentation, **x86 Built-in Functions** (`__builtin_cpu_supports`).  
-  https://gcc.gnu.org/onlinedocs/gcc/x86-Built-in-Functions.html
+Sian-Jheng Lin, Wei-Ho Chung, and Yunghsiang S. Han, **“Novel Polynomial Basis and Its Application to Reed-Solomon Erasure Codes”**.  
+https://arxiv.org/abs/1404.3458
+
+## Carry-less multiplication
+
+Intel, **“Enabling High-Performance Galois-Counter-Mode on Intel Architecture Processors”**.  
+Discusses 128-bit binary-field multiplication with `PCLMULQDQ`, including classical and Karatsuba variants.  
+https://www.intel.com/content/dam/www/public/us/en/documents/software-support/enabling-high-performance-gcm.pdf
+
+## OS-backed seed acquisition
+
+Linux `getrandom(2)` manual page.  
+https://man7.org/linux/man-pages/man2/getrandom.2.html
+
+Microsoft, **BCryptGenRandom**.  
+https://learn.microsoft.com/en-us/windows/win32/api/bcrypt/nf-bcrypt-bcryptgenrandom
 
 ---
 
 # Status
 
-The current implementation is a first research-quality prototype with independent arithmetic and FFT-vs-Horner checks. Its main purpose is to make the construction, its exact guarantees, its assumptions, and its limitations explicit enough to be independently discussed and challenged.
+The current implementation is a research-quality experimental prototype.
 
-Feedback, counterexamples, theoretical corrections, implementation review, and comparisons with related constructions are welcome.
+The 128-bit revision has independent checks for:
+
+- portable vs. PCLMUL GF(2^128) arithmetic;
+- additive FFT vs. direct Horner evaluation;
+- positions above `2^64`;
+- carry across the 64-bit position boundary;
+- serial vs. parallel identity;
+- exhaustive toy-model `k`-wise independence;
+- XOR masking;
+- a negative reducible-field control;
+- and the low/high split-field output mapping.
+
+The design goal is to make every major claim separable:
+
+- what is exact;
+- what is computational;
+- what is an implementation optimization;
+- what is merely a practical initialization choice;
+- and what is not claimed at all.
+
+Feedback, counterexamples, theoretical corrections, implementation review and comparisons with related constructions are welcome.

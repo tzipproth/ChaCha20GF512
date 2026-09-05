@@ -7,7 +7,7 @@
 // output at position x is P(x) with x interpreted as a field element, over a
 // field defined by a low-weight irreducible polynomial.
 //
-//   Production: GF(2^64), 512 coefficients, seed space 2^32768 (not enumerable)
+//   Production: GF(2^128), 512 coefficients, seed space 2^65536 (not enumerable)
 //   Toy:        GF(2^4),  4 coefficients,   seed space 2^16
 //               GF(2^8),  3 coefficients,   seed space 2^24
 //
@@ -18,6 +18,10 @@
 //                  role of ChaCha20 in the hybrid) leaves (A) unchanged
 //   (D) control:   with a REDUCIBLE polynomial (x^4+1) check (A) must FAIL,
 //                  proving the test can detect a broken construction
+//   (E) projection: project GF(2^4) outputs to 2 bits; every 4-tuple must
+//                  occur exactly 2^(16-8)=256 times over the seed space
+//   (F) split halves: use low/high 2-bit halves as adjacent output words,
+//                  mirroring the production low64/high64 mapping
 //
 // Modes:
 //   quick  (~1 s)  GF(2^4): (A) over ALL 1820 position sets, (B)/(C) sampled,
@@ -25,8 +29,8 @@
 //   full  (~15 s)  additionally (B)/(C) over ALL sets and GF(2^8) with
 //                  `gf8_sets` sampled position sets.
 //
-// This does not test the 64-bit generator; it tests the theorem and the
-// construction.  The proof is field-independent, so a defect would show up
+// This does not test the 128-bit production field directly; it tests the theorem
+// and the construction, including the 128->64 style output projection.  The proof is field-independent, so a defect would show up
 // here.  See README, "Toy-model verification".
 
 #include <algorithm>
@@ -140,6 +144,68 @@ static bool check_exactly_once(const unsigned* pos, unsigned k, bool masked)
     return true;
 }
 
+
+// ---------------------------------------------------------------------------
+// (E): projection of each field value to fewer output bits preserves k-wise
+// independence.  Production uses GF(2^128)->64 bits; the toy analogue uses
+// GF(2^4)->2 bits and can exhaust the entire seed space.
+// ---------------------------------------------------------------------------
+template <class F, unsigned M>
+static bool check_projected_uniform(const unsigned* pos, unsigned k, unsigned out_bits)
+{
+    const uint64_t seeds = 1ull << (M * k);
+    const uint64_t tuples = 1ull << (out_bits * k);
+    const uint64_t expected = seeds / tuples;
+    std::vector<uint32_t> count(std::size_t(tuples), 0);
+    unsigned c[16];
+    const unsigned mask = (1u << out_bits) - 1u;
+
+    for (uint64_t s = 0; s < seeds; ++s) {
+        seed_to_coeffs<M>(s, k, c);
+        uint64_t tuple = 0;
+        for (unsigned i = 0; i < k; ++i) {
+            const unsigned v = F::eval(c, k, pos[i]) & mask;
+            tuple |= uint64_t(v) << (out_bits * i);
+        }
+        ++count[std::size_t(tuple)];
+    }
+    for (uint32_t n : count)
+        if (n != expected) return false;
+    return true;
+}
+
+// Production uses both 64-bit halves of each GF(2^128) evaluation for two
+// adjacent output words.  This toy analogue splits a GF(2^4) value into two
+// 2-bit words and checks arbitrary word-position selections.
+template <class F, unsigned M>
+static bool check_split_halves_uniform(const unsigned* word_pos, unsigned k, unsigned half_bits)
+{
+    const uint64_t seeds = 1ull << (M * k);
+    const uint64_t tuples = 1ull << (half_bits * k);
+    const uint64_t expected = seeds / tuples;
+    std::vector<uint32_t> count(std::size_t(tuples), 0);
+    unsigned c[16];
+    const unsigned mask = (1u << half_bits) - 1u;
+
+    for (uint64_t seed = 0; seed < seeds; ++seed) {
+        seed_to_coeffs<M>(seed, k, c);
+        uint64_t tuple = 0;
+        for (unsigned i = 0; i < k; ++i) {
+            const unsigned eval_pos = word_pos[i] >> 1;
+            unsigned v = F::eval(c, k, eval_pos);
+            if (word_pos[i] & 1u)
+                v >>= half_bits;
+            v &= mask;
+            tuple |= uint64_t(v) << (half_bits * i);
+        }
+        ++count[std::size_t(tuple)];
+    }
+
+    for (uint32_t n : count)
+        if (n != expected) return false;
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // (B): number of distinct reachable (k+1)-tuples.
 // ---------------------------------------------------------------------------
@@ -148,21 +214,53 @@ static uint64_t count_reachable(const unsigned* pos, unsigned k1)
 {
     const unsigned k = k1 - 1;
     const uint64_t seeds = 1ull << (M * k);
-    const uint64_t tuples = 1ull << (M * k1);
-    std::vector<uint8_t> seen(std::size_t((tuples + 7) / 8), 0);
-    uint64_t distinct = 0;
+    const unsigned tuple_bits = M * k1;
     unsigned c[16];
 
+    // A direct bitset is ideal for the small GF(2^4) checks, but the GF(2^8)
+    // k+1 test has a 2^32 tuple universe and would reserve 512 MiB.  In that
+    // case store only the 2^24 actually generated tuples, then sort/unique.
+    if (tuple_bits <= 26) {
+        const uint64_t tuples = 1ull << tuple_bits;
+        std::vector<uint8_t> seen(std::size_t((tuples + 7) / 8), 0);
+        uint64_t distinct = 0;
+        for (uint64_t s = 0; s < seeds; ++s) {
+            seed_to_coeffs<M>(s, k, c);
+            uint64_t tuple = 0;
+            for (unsigned i = 0; i < k1; ++i)
+                tuple |= uint64_t(F::eval(c, k, pos[i])) << (M * i);
+            uint8_t& byte = seen[std::size_t(tuple >> 3)];
+            const uint8_t bit = uint8_t(1u << (tuple & 7));
+            if (!(byte & bit)) { byte |= bit; ++distinct; }
+        }
+        return distinct;
+    }
+
+    if (tuple_bits <= 32) {
+        std::vector<uint32_t> generated;
+        generated.reserve(static_cast<std::size_t>(seeds));
+        for (uint64_t s = 0; s < seeds; ++s) {
+            seed_to_coeffs<M>(s, k, c);
+            uint64_t tuple = 0;
+            for (unsigned i = 0; i < k1; ++i)
+                tuple |= uint64_t(F::eval(c, k, pos[i])) << (M * i);
+            generated.push_back(static_cast<uint32_t>(tuple));
+        }
+        std::sort(generated.begin(), generated.end());
+        return static_cast<uint64_t>(std::unique(generated.begin(), generated.end()) - generated.begin());
+    }
+
+    std::vector<uint64_t> generated;
+    generated.reserve(static_cast<std::size_t>(seeds));
     for (uint64_t s = 0; s < seeds; ++s) {
         seed_to_coeffs<M>(s, k, c);
         uint64_t tuple = 0;
         for (unsigned i = 0; i < k1; ++i)
             tuple |= uint64_t(F::eval(c, k, pos[i])) << (M * i);
-        uint8_t& byte = seen[std::size_t(tuple >> 3)];
-        const uint8_t bit = uint8_t(1u << (tuple & 7));
-        if (!(byte & bit)) { byte |= bit; ++distinct; }
+        generated.push_back(tuple);
     }
-    return distinct;
+    std::sort(generated.begin(), generated.end());
+    return static_cast<uint64_t>(std::unique(generated.begin(), generated.end()) - generated.begin());
 }
 
 // Enumerate all k-subsets of {0..n-1}.
@@ -255,6 +353,28 @@ static bool run_toy_kwise_test(bool full, unsigned gf8_sets, std::FILE* out)
         const bool control_fails = !gf16_check_A<0x1>(nullptr) && !SmallField<4, 0x1>::is_field();
         say("    (D) control:   reducible x^4+1 breaks (A)  %s\n", control_fails ? "OK" : "FAILED (test is not discriminating!)");
         ok &= control_fails;
+
+        // (E) Production now evaluates in GF(2^128) and projects each field
+        // value to 64 output bits.  Exhaustively verify the analogous
+        // GF(2^4)->2-bit projection here.
+        const unsigned posp[K] = {0, 1, 2, 3};
+        const bool projection_ok = check_projected_uniform<F, M>(posp, K, 2);
+        say("    (E) projection: GF(2^4)->2 bits, every 4-tuple occurs 256 times  %s\n",
+            projection_ok ? "OK" : "FAILED");
+        ok &= projection_ok;
+
+        const unsigned split_sets[][K] = {
+            {0, 1, 2, 3},   // both halves of two evaluation points
+            {0, 2, 4, 6},   // low halves of four distinct points
+            {1, 3, 5, 7},   // high halves of four distinct points
+            {0, 1, 4, 7}    // mixed halves and mixed multiplicities
+        };
+        bool split_ok = true;
+        for (const auto& ws : split_sets)
+            split_ok &= check_split_halves_uniform<F, M>(ws, K, 2);
+        say("    (F) split halves: paired GF value halves preserve 4-wise output uniformity  %s\n",
+            split_ok ? "OK" : "FAILED");
+        ok &= split_ok;
     }
 
     if (full) {

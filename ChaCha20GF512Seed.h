@@ -27,8 +27,8 @@
 //
 // IMPORTANT:
 // BCryptGenRandom/getrandom() are operating-system CSPRNG interfaces. They are
-// the recommended practical way to seed the generator, but reading 4128 bytes
-// from an OS CSPRNG does NOT prove that 33024 bits of fresh physical entropy
+// the recommended practical way to seed the generator, but reading 8224 bytes
+// from an OS CSPRNG does NOT prove that 65792 bits of fresh physical entropy
 // were injected. The exact information-theoretic 512-wise statement is a
 // statement about uniform sampling of the full explicit seed space.
 namespace chacha20gf512_seed
@@ -46,7 +46,7 @@ namespace chacha20gf512_seed
             const NTSTATUS st = BCryptGenRandom(
                 nullptr, reinterpret_cast<PUCHAR>(p), chunk,
                 BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-            if (st < 0)
+            if (!BCRYPT_SUCCESS(st))
                 return false;
             p += chunk;
             bytes -= chunk;
